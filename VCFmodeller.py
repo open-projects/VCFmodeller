@@ -207,14 +207,14 @@ def main():
 if __name__ == '__main__':
     main()
 
-    af = 0.4
-    hr = 0.80
-    chrom = 'chr1'
-    pos = 123456
+    #af = 0.4
+    #hr = 0.80
+    #chrom = 'chr1'
+    #pos = 123456
 
-    var = VirtualVCF('virtual.vcf', 100)
-    var.set_header()
-    af_chk, hr_chk = var.add_variation(chrom, pos, 'rs123456', 'T', 'C', '.', 'PASS', 'info=HaHa;', af, hr)
+    #var = VirtualVCF('virtual.vcf', 100)
+    #var.set_header()
+    #af_chk, hr_chk = var.add_variation(chrom, pos, 'rs123456', 'T', 'C', '.', 'PASS', 'info=HaHa;', af, hr)
 
-    print('{}:{} => AF={} ({}), HR={} ({})'.format(chrom, pos, af, af_chk, hr, hr_chk))
+    #print('{}:{} => AF={} ({}), HR={} ({})'.format(chrom, pos, af, af_chk, hr, hr_chk))
 
