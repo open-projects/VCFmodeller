@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import re
+import sys
 import argparse
 import random
 import atexit
@@ -11,7 +12,7 @@ class VirtualVCF:
     def __init__(self, file_name, n=1000):
         self._num = n
         self._title = '\t'.join(['#CHROM', 'POS', 'ID', 'REF', 'ALT', 'QUAL', 'FILTER', 'INFO', 'FORMAT'] +
-                                ['S' + str(n) for n in range(1, self._num + 1)])
+                                ['V' + str(n) for n in range(1, self._num + 1)])
         self._name = file_name
         self._file = None
         atexit.register(self.cleanup)
@@ -23,49 +24,55 @@ class VirtualVCF:
         except IOError:
             print("Can't open file: {}".format(self._name))
 
-        if not re.match(r'#CHROM', header):
+        if not re.search(r'#CHROM', header):
             header += '\n' + self._title
         print(header, file=self._file)
 
         return header
 
-    def add_variation(self, chrom, pos, var_id, ref, alt, quality, flt, info, af=0, homo=1):
-        haplo_bank = []  # a set of sample haplotypes
+    def add_variation(self, chrom, pos, var_id, ref, alt, quality, flt, haplo_bank):
         if not self._file:
             raise IOError("ERROR: VCF header was not set for file {}".format(self._name))
 
-        if af < 0 or af > 1:
-            raise ValueError("ERROR: Allele frequency (AF) must be in the range: 0 <= AF <= 1")
+        an = len(haplo_bank) * 2
+        ac_set = {}
+        for k, hap in enumerate(haplo_bank):
+            allele1, allele2 = [int(x) for x in re.split(r'[/|]', hap)]
 
-        if homo == 1:
-            n_homo_1 = round(self._num * af)  # number of homozygous samples with alternative allele
-            n_homo_0 = self._num - n_homo_1  # number of homozygous samples with reference allele
+            if allele1 in ac_set.keys():
+                ac_set[allele1] += 1
+            else:
+                ac_set[allele1] = 1
 
-            for n in range(n_homo_1):
-                haplo_bank.append(Haplotype(1, 1))
-            for n in range(n_homo_0):
-                haplo_bank.append(Haplotype(0, 0))
-        elif 0 <= homo < 1:
-            n_1 = round(2 * self._num * af)
-            n_0 = 2 * self._num - n_1
+            if allele2 in ac_set.keys():
+                ac_set[allele2] += 1
+            else:
+                ac_set[allele2] = 1
 
-            n_hetero = self._num - round(homo * self._num)  # number of heterozygous samples
-            n_homo_1 = round((n_1 - n_hetero) / 2)
-            n_homo_0 = round((n_0 - n_hetero) / 2)
-            if n_homo_1 < 0 or n_homo_0 < 0:
-                raise ValueError("ERROR: wrong homozygosity rate (HR): {}".format(homo))
-            n_hetero = self._num - n_homo_1 - n_homo_0
+        ac = []
+        af = []
+        hr = []
+        num_samples = len(haplo_bank)
+        accuracy = len(str(num_samples))
+        hr_set = [0] * (max(ac_set.keys()) + 1)
+        maf = 0
+        for i in range(1, len(hr_set)):
+            if i not in ac_set.keys():
+                raise ValueError("ERROR - wrong number of allele counts.")
+            af.append(str(round(ac_set[i] / an, accuracy)))
+            ac.append(str(ac_set[i]))
+            if i == 1:
+                maf = af[0]
 
-            for n in range(n_hetero):
-                haplo_bank.append(Haplotype(0, 1))
-            for n in range(n_homo_1):
-                haplo_bank.append(Haplotype(1, 1))
-            for n in range(n_homo_0):
-                haplo_bank.append(Haplotype(0, 0))
-        else:
-            raise ValueError("ERROR: homozygosity rate (HR) must be in the range: 0 <= HR <= 1")
+            for h in haplo_bank:
+                a1, a2 = re.split(r'[|/]', h)
+                if int(a1) == i and int(a1) == int(a2):
+                    hr_set[i] += 1
+        for h in hr_set[1:]:
+            hr.append(str(round(h / num_samples, accuracy)))
 
-        random.shuffle(haplo_bank)
+        info = 'AC={};AN={};AF={};HR={};'.format(','.join(ac), str(an), ','.join(af), ','.join(hr))
+
         record = '\t'.join([
             str(chrom),
             str(pos),
@@ -74,32 +81,13 @@ class VirtualVCF:
             alt,
             str(quality),
             str(flt),
-            str(info),
-            Haplotype.format,
-            '\t'.join(hp.get() for hp in haplo_bank)
+            info,
+            'GT',
+            '\t'.join(haplo_bank)
         ])
         print(record, file=self._file)
 
-        return self.check(record)
-
-    def check(self, rec):  # self check-up function
-        n = 0
-        n_alt = 0
-        n_homo = 0
-        for match in re.finditer(r'\t([01])/([01])', rec):
-            h1, h2 = int(match.group(1)), int(match.group(2))
-            n_alt += h1 + h2
-            if h1 == h2:
-                n_homo += 1
-            n += 2
-
-        af = round(n_alt / n, 4)
-        hr = round(2 * n_homo / n, 4)
-
-        if self._num != n / 2:
-            raise ValueError("ERROR: wrong number of samples in the output!")
-
-        return af, hr
+        return maf
 
     def cleanup(self):
         try:
@@ -110,52 +98,83 @@ class VirtualVCF:
 # end of class VirtualVCF
 
 
-class Haplotype:
-    format = 'GT'
+class HaploRevolver:
+    def __init__(self, num_of_samples, hr_type=True):
+        self._n_samples = num_of_samples
+        self._n_alleles_total = num_of_samples * 2
+        self._n_alleles_ref = self._n_alleles_total
+        self._revolver = []
+        self._haplotypes = []
+        self._hr_type = hr_type
+        self._num_alt = 0
 
-    def __init__(self, hap_1=0, hap_2=0):
-        self.gt = str(hap_1) + '/' + str(hap_2)
+    def add_alt_allele(self, af, hr=None):
+        num = self._num_alt + 1
+        n_alleles = round(self._n_alleles_total * af)
+        if not n_alleles:
+            return False
 
-    def set(self, hap_1=0, hap_2=0):
-        self.gt = str(hap_1) + '/' + str(hap_2)
-        return self.gt
+        self._n_alleles_ref -= n_alleles
+        if self._n_alleles_ref < 0:
+            self._n_alleles_ref = 0
+
+        if self._hr_type:
+            if hr is None:
+                raise ValueError("ERROR - no HR value, set 'hr_type=False' before.")
+
+            n_homo = round(self._n_samples * hr)
+            if n_alleles < n_homo * 2:
+                n_homo = int(n_alleles / 2)
+
+            if n_alleles - n_homo * 2 < 0:
+                raise ValueError("ERROR - wrong ALT allele homozygosity rate!")
+            self._haplotypes += [str(num) + '/' + str(num)] * n_homo
+            if n_alleles - n_homo * 2 > 0:  # important!
+                self._revolver.append([num] * (n_alleles - n_homo * 2))
+        else:
+            if n_alleles > 0:  # important!
+                self._revolver.append([num] * n_alleles)
+
+        self._num_alt += 1
+
+        return True
 
     def get(self):
-        return self.gt
+        if self._n_alleles_ref > 0:  # important!
+            self._revolver.append([0] * self._n_alleles_ref)
+        empty_bullets = set()
+        revolver_size = len(self._revolver)
+        while len(empty_bullets) < revolver_size:
+            allele = []
+            exclude = set()
+            for n in range(2):
+                if len(list(set(range(revolver_size)) - empty_bullets - exclude)) < 1:
+                    break
+                k = random.choice(list(set(range(revolver_size)) - empty_bullets - exclude))
+                if len(self._revolver[k]):
+                    allele.append(str(self._revolver[k][0]))
+                    self._revolver[k].pop()
+                    if self._hr_type and len(empty_bullets) + 1 < revolver_size:
+                        # exclude if only one allele in the revolver or no HR
+                        exclude.add(k)
+                else:
+                    raise ValueError("ERROR - no bullet in the revolver!")
 
-# end of class Haplotype
+                if not len(self._revolver[k]):
+                    empty_bullets.add(k)
 
+            if len(allele) == 2:
+                if len(self._haplotypes) < self._n_samples:
+                    self._haplotypes.append('/'.join(allele))
 
-class HR:
-    def __init__(self, af):
-        if af < 0 or af > 1:
-            raise ValueError("ERROR: wrong AF value: {}".format(af))
-        self.af = af
-        self.max_hr = self.get_max()
-        self.optimal_hr = self.get_optimal()
+        random.shuffle(self._haplotypes)
+        if len(self._haplotypes) != self._n_samples:
+            raise ValueError(
+                "ERROR - wrong number of haplotipes: {} (mast be {})".format(len(self._haplotypes), self._n_samples))
 
-    def get_max(self):
-        if 0 <= self.af <= 0.5:
-            return 2 * (1 - self.af)
+        return self._haplotypes
 
-        return 2 * self.af - 1
-
-    def get_optimal(self):
-        # hetero = 1 - self.af ** 2 - (self.af - 1) ** 2
-        homo = self.af ** 2 + (self.af - 1) ** 2
-        return homo
-
-    def get(self, hr=None):
-        if hr is None:
-            return self.optimal_hr
-        elif hr > self.max_hr:
-            return self.max_hr
-        elif hr < 0:
-            raise ValueError("ERROR: wrong HR value: {}".format(af))
-
-        return hr
-
-# end of class HR
+# end of class HaploRevolver
 
 
 def main():
@@ -164,40 +183,76 @@ def main():
                                      based on Allele Frequency (AF) and Homozygosity Rate (HR)")
 
     parser.add_argument('-i', help='input gzipped decomposed VCF file (INFO must have `AF` and `HR` values)')
-    parser.add_argument('-o', default='output.vcf.gz', help='output gzipped VCF file with virtual haplotypes')
+    parser.add_argument('-o', default='output.vcf', help='output VCF file with virtual haplotypes')
     parser.add_argument('-n', default='1000', help='number of virtual samples')
 
     args = parser.parse_args()
 
     in_file = args.i
     out_file = args.o
-    n_samples = args.n
+    n_samples = int(args.n)
 
     virtual_vcf = VirtualVCF(out_file, n_samples)
-    with gzip.open(in_file, 'wt') as f_in:
+    with gzip.open(in_file, 'rt') as f_in:
         header = ''
         for line in f_in:
-            if re.match(r'#', line):
-                header += line
-            else:
+            if re.match(r'#CHROM', line):
+                if not re.search(r'^<ID=GT,', header):
+                    header += '##FORMAT=<ID=GT,Number=1,Type=String,Description="Genotype">\n'
+                if not re.search(r'<ID=HR', header):
+                    header += '##INFO=<ID=HR,Number=A,Type=Float,Description="Homozigous Rate">\n'
                 virtual_vcf.set_header(header)
                 break
+            elif re.match(r'#', line):
+                header += line
 
         for line in f_in:
             fields = re.split(r'\t', line)
             if len(fields) > 7:
                 chrom, pos, var_id, ref, alt, quality, flt, info = fields[0:8]
 
-                found = re.search(r'[\t; ]AF=([0-9.]+)', info)
-                af = float(found.group(1)) if found else 0
-                homo = HR(af)
+                if int(pos) == 15388335:
+                    pass
 
-                found = re.search(r'[\t; ]HR=([0-9.]+)', info)
-                hr = float(found.group(1)) if found else None
-                hr = homo.get(hr)
+                found = re.search(r'[\t; ]AF=([^;]+);', info)
+                af_str = found.group(1) if found else ''
+                af_set = re.split(r',', af_str)
+                alt_set = re.split(r',', alt)
 
-                af_chk, hr_chk = virtual_vcf.add_variation(chrom, pos, var_id, ref, alt, quality, flt, info, af, hr)
-                print('{}:{} => AF={} ({}), HR={} ({})'.format(chrom, pos, af, af_chk, hr, hr_chk))
+                if len(alt_set) != len(af_set):
+                    print("ERROR - AF/Allele number mismatch:\n{}\n".format(line))
+                    continue
+
+                found = re.search(r'[\t; ]HR=([^;]+);', info)
+                hr_str = found.group(1) if found else ''
+                hr_set = re.split(r',', hr_str)
+
+                hr_type = True
+                if len(hr_set) > 0 and len(hr_set) != len(af_set):
+                    print("ERROR - AF/HR number mismatch:\n{}\n".format(line))
+                    hr_type = False
+                    continue
+
+                try:
+                    revolver = HaploRevolver(n_samples, hr_type)
+                    alt_alleles = []
+                    for n in range(len(af_set)):
+                        if hr_type:
+                            if revolver.add_alt_allele(float(af_set[n]), float(hr_set[n])):
+                                alt_alleles.append(alt_set[n])
+                        else:
+                            if revolver.add_alt_allele(float(af_set[n])):
+                                alt_alleles.append(alt_set[n])
+
+                    hamplo_set = revolver.get()
+                    ptrn = re.search(r'AF=([^;,]+)[,;]', info)
+                    real_maf = round(float(ptrn.group(1)), len(str(len(hamplo_set)))) if ptrn else 0
+                    if len(alt_alleles):
+                        maf = virtual_vcf.add_variation(chrom, pos, var_id, ref, ','.join(alt_alleles), quality, flt, hamplo_set)
+                        print('{}\t{}\treal_AF= {}\tAF= {}'.format(chrom, pos, real_maf, maf))
+
+                except ValueError:
+                    print("ERROR in the record: {} {} {} {}".format(chrom, pos, var_id, ref), file=sys.stderr)
 
     print('...done')
 
@@ -206,15 +261,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-    #af = 0.4
-    #hr = 0.80
-    #chrom = 'chr1'
-    #pos = 123456
-
-    #var = VirtualVCF('virtual.vcf', 100)
-    #var.set_header()
-    #af_chk, hr_chk = var.add_variation(chrom, pos, 'rs123456', 'T', 'C', '.', 'PASS', 'info=HaHa;', af, hr)
-
-    #print('{}:{} => AF={} ({}), HR={} ({})'.format(chrom, pos, af, af_chk, hr, hr_chk))
 
